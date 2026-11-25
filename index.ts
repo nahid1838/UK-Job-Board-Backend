@@ -3,6 +3,9 @@ import { config } from "dotenv";
 import express from "express";
 import { MongoClient, MongoError } from "mongodb";
 import { createSessionRoutes } from "./src/auth/session-routes.ts";
+import { createCompanyRoutes } from "./src/companies/company-routes.ts";
+import { createJobRoutes } from "./src/jobs/job-routes.ts";
+import { createApplicationRoutes } from "./src/applications/application-routes.ts";
 
 config({ quiet: true });
 
@@ -12,7 +15,15 @@ const port = Number(process.env.PORT ?? 5000);
 const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
 app.use(cors({ origin: frontendOrigin, credentials: true }));
-app.use(express.json());
+const parseJson = express.json();
+app.use((request, response, next) => {
+  // CV requests are parsed after their session and origin have been checked.
+  if (request.method === "POST" && /^\/api\/job-applications\/?$/i.test(request.path)) {
+    next();
+    return;
+  }
+  parseJson(request, response, next);
+});
 app.use("/api", createSessionRoutes(frontendOrigin));
 
 app.get(["/", "/health"], (_request, response) => {
@@ -48,6 +59,19 @@ async function startServer() {
 
   const client = await connectToMongoDB();
   console.log("Connected to MongoDB.");
+  const db = client.db("UkJobBoardDB");
+  app.use("/api", createCompanyRoutes(db, frontendOrigin), createJobRoutes(db, frontendOrigin), createApplicationRoutes(db, frontendOrigin));
+  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+    if (error instanceof Error && "status" in error && error.status === 413) {
+      response.status(413).json({ message: "Your CV is too large. Upload a file up to 5 MB." });
+      return;
+    }
+    if (error instanceof SyntaxError && "status" in error && error.status === 400) {
+      response.status(400).json({ message: "Send a valid JSON request." });
+      return;
+    }
+    response.status(500).json({ message: "Something went wrong. Try again shortly." });
+  });
 
   app.listen(port, host, async (error) => {
     if (error) {

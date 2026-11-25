@@ -1,13 +1,12 @@
 import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 
-export function createSessionRoutes(frontendOrigin: string) {
-  const router = Router();
+export function createRequireSession(frontendOrigin: string) {
   const sessionUrl = new URL("/api/auth/get-session", frontendOrigin);
   sessionUrl.searchParams.set("disableCookieCache", "true");
   sessionUrl.searchParams.set("disableRefresh", "true");
 
-  async function requireSession(request: Request, response: Response, next: NextFunction) {
+  return async function requireSession(request: Request, response: Response, next: NextFunction) {
     response.set("Cache-Control", "no-store");
 
     const cookie = request.headers.cookie;
@@ -51,7 +50,12 @@ export function createSessionRoutes(frontendOrigin: string) {
     }
 
     next();
-  }
+  };
+}
+
+export function createSessionRoutes(frontendOrigin: string) {
+  const router = Router();
+  const requireSession = createRequireSession(frontendOrigin);
 
   router.get("/me", requireSession, (_request, response) => {
     response.json({ user: response.locals.currentUser });
