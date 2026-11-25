@@ -2,6 +2,7 @@
 import { config } from "dotenv";
 import express from "express";
 import { MongoClient, MongoError } from "mongodb";
+import { createSessionRoutes } from "./src/auth/session-routes.ts";
 
 config({ quiet: true });
 
@@ -12,6 +13,7 @@ const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
 app.use(cors({ origin: frontendOrigin, credentials: true }));
 app.use(express.json());
+app.use("/api", createSessionRoutes(frontendOrigin));
 
 app.get(["/", "/health"], (_request, response) => {
   response.json({ status: "ok" });

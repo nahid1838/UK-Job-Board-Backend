@@ -5,6 +5,7 @@
     "rootDir": ".",
     "outDir": "dist",
     "strict": true,
+    "rewriteRelativeImportExtensions": true,
     "noEmitOnError": true,
     "verbatimModuleSyntax": true
   },
