@@ -4,7 +4,8 @@ import express from "express";
 import { MongoClient, MongoError } from "mongodb";
 import { createSessionRoutes } from "./src/auth/session-routes.ts";
 import { createCompanyRoutes } from "./src/companies/company-routes.ts";
-import { createJobRoutes } from "./src/jobs/job-routes.ts";
+import { createJobRoutes, todayInTheUK } from "./src/jobs/job-routes.ts";
+import { createCategoryRoutes, getCategoryCollection } from "./src/categories/category-routes.ts";
 import { createApplicationRoutes } from "./src/applications/application-routes.ts";
 
 config({ quiet: true });
@@ -60,7 +61,13 @@ async function startServer() {
   const client = await connectToMongoDB();
   console.log("Connected to MongoDB.");
   const db = client.db("UkJobBoardDB");
-  app.use("/api", createCompanyRoutes(db, frontendOrigin), createJobRoutes(db, frontendOrigin), createApplicationRoutes(db, frontendOrigin));
+  try {
+    await getCategoryCollection(db).createIndex({ nameKeys: 1 }, { unique: true });
+  } catch {
+    await client.close();
+    throw new Error("Could not prepare the MongoDB categories collection.");
+  }
+  app.use("/api", createCompanyRoutes(db, frontendOrigin), createJobRoutes(db, frontendOrigin), createApplicationRoutes(db, frontendOrigin), createCategoryRoutes(db, frontendOrigin, todayInTheUK));
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof Error && "status" in error && error.status === 413) {
       response.status(413).json({ message: "Your CV is too large. Upload a file up to 5 MB." });

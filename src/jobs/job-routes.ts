@@ -2,6 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { ObjectId, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
 import type { CompanyApplication } from "../companies/company-routes.ts";
+import { categoryJobFilter, escapeSearch, findActiveCategory } from "../categories/category-routes.ts";
 
 const fieldLimits = {
   title: 120, category: 100, description: 6000, location: 120, postcode: 10,
@@ -16,6 +17,7 @@ type JobDetails = Record<keyof typeof fieldLimits, string> & {
 };
 
 export type Job = JobDetails & {
+  categoryId?: string;
   ownerId: string;
   companyName: string;
   status: "draft" | "live";
@@ -103,15 +105,21 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
   });
 
   router.post("/employer/jobs", requireJsonMutation, requireSession, requireApprovedCompany, async (request, response) => {
+    const category = await findActiveCategory(db, request.body?.categoryId);
+    if (!category) {
+      response.status(400).json({ message: "Choose an active job category." });
+      return;
+    }
     let details;
     try {
-      details = readJobDetails(request.body ?? {});
+      details = readJobDetails({ ...request.body, category: category.name });
     } catch (error) {
       response.status(400).json({ message: error instanceof Error ? error.message : "Check the job details." });
       return;
     }
     const job: Job = {
       ...details,
+      categoryId: category._id.toHexString(),
       ownerId: response.locals.currentUser.id,
       companyName: response.locals.approvedCompany.details.name,
       status: "draft",
@@ -143,14 +151,21 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
 
   router.get("/jobs", async (request, response) => {
     const search = (value: unknown) => typeof value === "string"
-      ? value.trim().slice(0, 120).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      ? escapeSearch(value.trim().slice(0, 120))
       : "";
     const keyword = search(request.query.keyword);
     const location = search(request.query.location);
+    const categoryId = request.query.category;
+    const category = categoryId ? await findActiveCategory(db, categoryId) : null;
+    if (categoryId && !category) {
+      response.json({ jobs: [] });
+      return;
+    }
     const results = await jobs.find({
       status: "live", closingDate: { $gte: todayInTheUK() },
       ...(keyword && { $or: ["title", "description", "companyName"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) }),
       ...(location && { location: { $regex: location, $options: "i" } }),
+      ...(category && { $and: [categoryJobFilter(category)] }),
     }).project({ ownerId: 0 }).sort({ publishedAt: -1 }).limit(100).toArray();
     response.json({ jobs: results });
   });
