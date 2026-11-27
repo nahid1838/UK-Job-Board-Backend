@@ -11,6 +11,7 @@ export function createSeekerProfileRoutes(db: Db, frontendOrigin: string) {
   const router = Router();
   const profiles = db.collection<SeekerProfile>("seekerProfiles");
   const employerProfiles = db.collection<SeekerProfile>("employerProfiles");
+  const adminProfiles = db.collection<SeekerProfile>("adminProfiles");
   const requireSession = createRequireSession(frontendOrigin);
   const origin = new URL(frontendOrigin).origin;
 
@@ -78,6 +79,13 @@ export function createSeekerProfileRoutes(db: Db, frontendOrigin: string) {
 
   registerProfileRoutes("/seeker/profile", profiles, requireSeeker);
   registerProfileRoutes("/employer/profile", employerProfiles, requireEmployer);
+  registerProfileRoutes("/admin/profile", adminProfiles, (_request, response, next) => {
+    if (response.locals.currentUser.role !== "admin") {
+      response.status(403).json({ message: "Only admins can access this profile." });
+      return;
+    }
+    next();
+  });
 
   router.put("/seeker/cv", requireMutation, requireSession, requireSeeker, json({ limit: "7mb" }), async (request, response) => {
     const encoded = request.body?.file;

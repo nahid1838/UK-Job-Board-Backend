@@ -3,6 +3,7 @@ import { MongoServerError, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
 import { publicCompanyId } from "./public-companies.ts";
 import { companyLogoIds } from "./company-logos.ts";
+import { getSiteSettings, notify, recordActivity } from "../admin/site-settings.ts";
 
 const fieldLimits = {
   name: 120, registrationNumber: 8, address: 180, town: 100, postcode: 10,
@@ -14,7 +15,7 @@ type CompanyDetails = Record<keyof typeof fieldLimits, string> & { acceptedTerms
 export type CompanyApplication = {
   _id: string;
   details: CompanyDetails;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "suspended";
   revision: number;
   submittedAt: Date;
   reviewedAt?: Date;
@@ -112,6 +113,10 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
         { upsert: true, returnDocument: "after" },
       );
       response.status(201).json({ application });
+      void recordActivity(db, user.id, "Company application submitted", details.name);
+      if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
+        void getSiteSettings(db).then(({ contactEmail }) => notify(db, "companySubmitted", contactEmail, { company: details.name })).catch(() => {});
+      }
     } catch (error) {
       if (error instanceof MongoServerError && error.code === 11000) {
         response.status(409).json({ message: "You already have a pending or approved company application. Refresh to see its current status." });
@@ -121,8 +126,8 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
     }
   });
 
-  router.get("/admin/company-applications", requireSession, requireAdmin, async (_request, response) => {
-    const pending = await applications.find({ status: "pending" }).sort({ submittedAt: 1 }).toArray();
+  router.get("/admin/company-applications", requireSession, requireAdmin, async (request, response) => {
+    const pending = await applications.find(request.query.all === "true" ? {} : { status: "pending" }).sort({ submittedAt: -1 }).toArray();
     response.json({ applications: pending });
   });
 
@@ -155,18 +160,20 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
   router.patch("/admin/company-applications/:id", requireJsonMutation, requireSession, requireAdmin, async (request, response) => {
     const { status, revision } = request.body ?? {};
     const reason = typeof request.body?.reason === "string" ? request.body.reason.trim() : "";
-    if ((status !== "approved" && status !== "rejected") || !Number.isInteger(revision)
+    if (typeof request.params.id !== "string" || !["approved", "rejected", "suspended", "reactivated"].includes(status) || !Number.isInteger(revision)
       || (status === "rejected" && (!reason || reason.length > 1000))) {
       response.status(400).json({ message: "Choose a decision and provide a reason of up to 1,000 characters when rejecting." });
       return;
     }
 
+    const expected = status === "suspended" ? "approved" : status === "reactivated" ? "suspended" : "pending";
+    const nextStatus = status === "reactivated" ? "approved" : status;
     const reviewed = await applications.findOneAndUpdate(
-      { _id: request.params.id, status: "pending", revision },
+      { _id: request.params.id, status: expected, revision },
       { $set: {
-        status, reviewedAt: new Date(), reviewedBy: response.locals.currentUser.id,
+        status: nextStatus, reviewedAt: new Date(), reviewedBy: response.locals.currentUser.id,
         ...(status === "rejected" ? { rejectionReason: reason } : {}),
-      } },
+      }, $inc: { revision: 1 } },
       { returnDocument: "after" },
     );
     if (!reviewed) {
@@ -174,6 +181,10 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     response.json({ application: reviewed });
+    void recordActivity(db, response.locals.currentUser.id, `Company ${status}`, reviewed.details.name);
+    if (status === "approved" || status === "rejected") {
+      void notify(db, status === "approved" ? "companyApproved" : "companyRejected", reviewed.details.contactEmail, { company: reviewed.details.name, reason });
+    }
   });
 
   return router;

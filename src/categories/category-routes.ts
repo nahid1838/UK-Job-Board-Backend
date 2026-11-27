@@ -1,6 +1,8 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { MongoServerError, ObjectId, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
+import type { CompanyApplication } from "../companies/company-routes.ts";
+import { recordActivity } from "../admin/site-settings.ts";
 
 export type Category = {
   _id: ObjectId;
@@ -70,10 +72,15 @@ export function createCategoryRoutes(db: Db, frontendOrigin: string, todayInTheU
   router.get("/categories", async (request, response) => {
     const active = await categories.find({ active: true }).sort(sort).toArray();
     const today = todayInTheUK();
+    const suspended = request.query.counts === "true"
+      ? await db.collection<CompanyApplication>("companyApplications").find({ status: "suspended" }).project({ _id: 1 }).toArray()
+      : [];
     const results = await Promise.all(active.map(async ({ _id, name, active, order, nameKeys }) => ({
       _id, name, order,
       ...(request.query.counts === "true" ? {
-        jobCount: await jobs.countDocuments({ status: "live", closingDate: { $gte: today }, ...categoryJobFilter({ _id, name, order, active, nameKeys }) }),
+        jobCount: await jobs.countDocuments({ status: "live", closingDate: { $gte: today },
+          ...(suspended.length && { ownerId: { $nin: suspended.map(({ _id }) => _id) } }),
+          ...categoryJobFilter({ _id, name, order, active, nameKeys }) }),
       } : {}),
     })));
     response.json({ categories: results });
@@ -93,6 +100,7 @@ export function createCategoryRoutes(db: Db, frontendOrigin: string, todayInTheU
       const _id = new ObjectId();
       await categories.insertOne({ _id, ...details, nameKeys: [details.name.toLowerCase()] });
       response.status(201).json({ category: { _id, ...details } });
+      void recordActivity(db, response.locals.currentUser.id, "Category added", details.name);
     } catch (error) {
       if (!(error instanceof MongoServerError) || error.code !== 11000) throw error;
       response.status(409).json({ message: "That name is already in use by a category, including past names." });
@@ -117,6 +125,7 @@ export function createCategoryRoutes(db: Db, frontendOrigin: string, todayInTheU
         return;
       }
       response.json({ category });
+      void recordActivity(db, response.locals.currentUser.id, "Category updated", details.name);
     } catch (error) {
       if (!(error instanceof MongoServerError) || error.code !== 11000) throw error;
       response.status(409).json({ message: "That name is already in use by a category, including past names." });

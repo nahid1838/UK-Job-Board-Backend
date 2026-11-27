@@ -1,5 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { ObjectId, type Db, type Filter, type Sort } from "mongodb";
+import { getSiteSettings, recordActivity } from "../admin/site-settings.ts";
 import { publicCompanyId } from "../companies/public-companies.ts";
 import { companyLogoIds } from "../companies/company-logos.ts";
 import { createRequireSession } from "../auth/session-routes.ts";
@@ -158,6 +159,7 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     response.json({ job });
+    void recordActivity(db, ownerId, "Job published", job.title);
   });
 
   async function manageJob(request: Request, response: Response) {
@@ -204,7 +206,8 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
         response.status(400).json({ message: "Choose whether to feature this job." });
         return;
       }
-      update = { featuredUntil: request.body.featured ? new Date(Date.now() + 7 * 86_400_000) : new Date(0) };
+      const { featuredDays } = await getSiteSettings(db);
+      update = { featuredUntil: request.body.featured ? new Date(Date.now() + featuredDays * 86_400_000) : new Date(0) };
     } else {
       response.status(409).json({ message: "This action is unavailable for the current job status." });
       return;
@@ -215,6 +218,7 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     response.json({ job });
+    void recordActivity(db, user.id, action === "feature" ? (request.body.featured ? "Job featured" : "Job unfeatured") : `Job ${action === "close" ? "closed" : action === "reopen" ? "reopened" : "edited"}`, job.title);
   }
 
   async function deleteJob(request: Request, response: Response) {
@@ -228,6 +232,7 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     response.json({ message: "Job deleted." });
+    void recordActivity(db, user.id, "Job deleted", typeof id === "string" ? id : "");
   }
 
   router.patch("/employer/jobs/:id", requireJsonMutation, requireSession, requireApprovedCompany, manageJob);
@@ -256,6 +261,8 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       ...(location && { location: { $regex: location, $options: "i" } }),
       ...(category && { $and: [categoryJobFilter(category)] }),
     };
+    const suspended = await companies.find({ status: "suspended" }).project({ _id: 1 }).toArray();
+    if (suspended.length) filter.ownerId = { $nin: suspended.map(({ _id }) => _id) };
     const { jobType, workMode, company, posted, sort, salaryPeriod } = request.query;
     if (typeof jobType === "string" && jobType) filter.jobType = jobType.slice(0, 30);
     if (typeof workMode === "string" && workMode) filter.workMode = workMode.slice(0, 20);
@@ -299,7 +306,7 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
     const job = typeof id === "string" && /^[a-f0-9]{24}$/i.test(id)
       ? await jobs.findOne({ _id: new ObjectId(id), status: "live", closingDate: { $gte: todayInTheUK() } })
       : null;
-    if (!job) {
+    if (!job || await companies.findOne({ _id: job.ownerId, status: "suspended" }, { projection: { _id: 1 } })) {
       response.status(404).json({ message: "This job is no longer accepting applications." });
       return;
     }

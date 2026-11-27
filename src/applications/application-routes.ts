@@ -5,6 +5,7 @@ import type { CompanyApplication } from "../companies/company-routes.ts";
 import { todayInTheUK, type Job } from "../jobs/job-routes.ts";
 import { publicCompanyId } from "../companies/public-companies.ts";
 import { companyLogoIds } from "../companies/company-logos.ts";
+import { getSiteSettings, notify, recordActivity } from "../admin/site-settings.ts";
 
 const maxCvBytes = 5 * 1024 * 1024;
 const cvTypes = {
@@ -33,6 +34,7 @@ type Application = {
   forwardedAt?: Date;
   forwardedBy?: string;
   employerStatus?: "reviewed" | "shortlisted" | "not-suitable";
+  adminNote?: string;
 };
 
 const privateFields = { cv: 0, seekerId: 0, companyOwnerId: 0, reviewedBy: 0, forwardedBy: 0 } as const;
@@ -117,7 +119,7 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     const job = await jobs.findOne({ _id: new ObjectId(jobId), status: "live", closingDate: { $gte: todayInTheUK() } });
-    if (!job) {
+    if (!job || await companies.findOne({ _id: job.ownerId, status: "suspended" }, { projection: { _id: 1 } })) {
       response.status(404).json({ message: "This job is no longer accepting applications." });
       return;
     }
@@ -142,6 +144,11 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       throw error;
     }
     response.status(201).json({ message: "Application submitted." });
+    void recordActivity(db, user.id, "New application submitted", job.title);
+    void notify(db, "applicationSubmitted", details.email, { job: job.title });
+    if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
+      void getSiteSettings(db).then(({ contactEmail }) => notify(db, "applicationReceived", contactEmail, { job: job.title })).catch(() => {});
+    }
   });
 
   router.get("/job-applications/mine", requireSession, async (_request, response) => {
@@ -176,6 +183,14 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       return;
     }
     response.json({ status });
+    void recordActivity(db, reviewer, `Application ${status.replaceAll("-", " ")}`, id);
+    if (status === "forwarded" && process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
+      void applications.findOne({ _id: id }, { projection: { companyOwnerId: 1, jobTitle: 1 } }).then(async (application) => {
+        if (!application) return;
+        const company = await companies.findOne({ _id: application.companyOwnerId, status: "approved" });
+        if (company) await notify(db, "applicationForwarded", company.details.contactEmail, { job: application.jobTitle });
+      }).catch(() => {});
+    }
   });
 
   router.get("/employer/job-applications", requireSession, async (_request, response) => {
@@ -185,8 +200,21 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       response.status(403).json({ message: "Your company must be approved to view forwarded applications." });
       return;
     }
-    const results = await applications.find({ companyOwnerId: ownerId, status: "forwarded" }).project(privateFields).sort({ forwardedAt: -1 }).toArray();
+    const results = await applications.find({ companyOwnerId: ownerId, status: "forwarded" }).project({ ...privateFields, adminNote: 0 }).sort({ forwardedAt: -1 }).toArray();
     response.json({ applications: results });
+  });
+
+  router.patch("/admin/job-applications/:id/note", requireMutation, requireSession, requireAdmin, async (request, response) => {
+    const { id } = request.params;
+    const note = typeof request.body?.note === "string" ? request.body.note.trim() : null;
+    if (typeof id !== "string" || note === null || note.length > 2000) {
+      response.status(400).json({ message: "Enter a private note up to 2,000 characters." });
+      return;
+    }
+    const result = await applications.updateOne({ _id: id }, { $set: { adminNote: note } });
+    if (!result.matchedCount) { response.status(404).json({ message: "Application not found." }); return; }
+    response.json({ note });
+    void recordActivity(db, response.locals.currentUser.id, "Application note updated", id);
   });
 
   router.patch("/employer/job-applications/:id", requireMutation, requireSession, async (request, response) => {

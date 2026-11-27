@@ -67,7 +67,7 @@ export function createEmployerDashboardRoutes(db: Db, frontendOrigin: string) {
     }
     viewBudget.set(key, budget && budget.expires > now ? { ...budget, remaining: budget.remaining - 1 } : { expires: now + 60_000, remaining: 59 });
     const job = await jobs.findOne({ _id: new ObjectId(id), status: "live", closingDate: { $gte: todayInTheUK() } }, { projection: { ownerId: 1 } });
-    if (!job) {
+    if (!job || await companies.findOne({ _id: job.ownerId, status: "suspended" }, { projection: { _id: 1 } })) {
       response.sendStatus(404);
       return;
     }
