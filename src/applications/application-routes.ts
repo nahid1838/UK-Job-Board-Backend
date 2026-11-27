@@ -3,6 +3,8 @@ import { Binary, MongoServerError, ObjectId, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
 import type { CompanyApplication } from "../companies/company-routes.ts";
 import { todayInTheUK, type Job } from "../jobs/job-routes.ts";
+import { publicCompanyId } from "../companies/public-companies.ts";
+import { companyLogoIds } from "../companies/company-logos.ts";
 
 const maxCvBytes = 5 * 1024 * 1024;
 const cvTypes = {
@@ -23,7 +25,7 @@ type Application = {
   coverLetter: string;
   cv: Binary;
   cvType: keyof typeof cvTypes;
-  status: "new" | "forwarded" | "not-suitable";
+  status: "new" | "shortlisted" | "forwarded" | "not-suitable";
   createdAt: Date;
   consentRecordedAt: Date;
   reviewedAt?: Date;
@@ -33,9 +35,9 @@ type Application = {
 };
 
 const privateFields = { cv: 0, seekerId: 0, companyOwnerId: 0, reviewedBy: 0, forwardedBy: 0 } as const;
-const seekerFields = { jobId: 1, jobTitle: 1, companyName: 1, status: 1, createdAt: 1 } as const;
+const seekerFields = { jobId: 1, jobTitle: 1, companyName: 1, companyOwnerId: 1, status: 1, createdAt: 1, reviewedAt: 1 } as const;
 
-function readApplication(body: Record<string, unknown>) {
+function readApplication(body: Record<string, unknown>, savedCv?: { cv: Binary; cvType: Application["cvType"] }) {
   const text = (key: string) => typeof body[key] === "string" ? body[key].trim() : "";
   const name = text("name");
   const email = text("email");
@@ -46,6 +48,10 @@ function readApplication(body: Record<string, unknown>) {
     throw new Error("Check your name, email, phone number, and cover letter.");
   }
   if (body.acceptedConsent !== true) throw new Error("Confirm that your application can be shared after admin review.");
+  if (body.useSavedCv === true) {
+    if (!savedCv) throw new Error("Your saved CV is unavailable. Upload a CV to continue.");
+    return { name, email, phone, coverLetter, cv: savedCv.cv, cvType: savedCv.cvType };
+  }
 
   const encodedCv = body.cvBase64;
   if (typeof encodedCv !== "string" || !encodedCv || encodedCv.length > Math.ceil(maxCvBytes / 3) * 4) {
@@ -68,6 +74,7 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
   const applications = db.collection<Application>("jobApplications");
   const jobs = db.collection<Job>("jobs");
   const companies = db.collection<CompanyApplication>("companyApplications");
+  const profiles = db.collection<{ _id: string; cv: Binary; cvType: Application["cvType"] }>("seekerProfiles");
   const requireSession = createRequireSession(frontendOrigin);
   const allowedOrigin = new URL(frontendOrigin).origin;
 
@@ -98,9 +105,12 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       response.status(404).json({ message: "This job is unavailable." });
       return;
     }
+    const savedCv = request.body?.useSavedCv === true
+      ? await profiles.findOne({ _id: user.id, cv: { $exists: true }, cvType: { $in: ["pdf", "docx"] } }, { projection: { cv: 1, cvType: 1 } })
+      : null;
     let details;
     try {
-      details = readApplication(request.body);
+      details = readApplication(request.body, savedCv ?? undefined);
     } catch (error) {
       response.status(400).json({ message: error instanceof Error ? error.message : "Check your application details." });
       return;
@@ -135,7 +145,11 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
 
   router.get("/job-applications/mine", requireSession, async (_request, response) => {
     const results = await applications.find({ seekerId: response.locals.currentUser.id }).project(seekerFields).sort({ createdAt: -1 }).toArray();
-    response.json({ applications: results });
+    const logos = await companyLogoIds(db, [...new Set(results.map(({ companyOwnerId }) => publicCompanyId(companyOwnerId)))]);
+    response.json({ applications: results.map(({ companyOwnerId, ...entry }) => {
+      const companyId = publicCompanyId(companyOwnerId);
+      return { ...entry, companyLogo: logos.has(companyId) ? `/company-logo/${companyId}` : undefined };
+    }) });
   });
 
   router.get("/admin/job-applications", requireSession, requireAdmin, async (_request, response) => {
@@ -146,13 +160,13 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
   router.patch("/admin/job-applications/:id", requireMutation, requireSession, requireAdmin, async (request, response) => {
     const { id } = request.params;
     const status = request.body?.status;
-    if (typeof id !== "string" || (status !== "forwarded" && status !== "not-suitable")) {
-      response.status(400).json({ message: "Choose Forward or Mark not suitable." });
+    if (typeof id !== "string" || (status !== "forwarded" && status !== "not-suitable" && status !== "shortlisted")) {
+      response.status(400).json({ message: "Choose Shortlist, Forward or Mark not suitable." });
       return;
     }
     const reviewer = response.locals.currentUser.id;
     const now = new Date();
-    const result = await applications.updateOne({ _id: id, status: "new" }, { $set: {
+    const result = await applications.updateOne({ _id: id, status: { $in: status === "shortlisted" ? ["new"] : ["new", "shortlisted"] } }, { $set: {
       status, reviewedAt: now, reviewedBy: reviewer,
       ...(status === "forwarded" ? { forwardedAt: now, forwardedBy: reviewer } : {}),
     } });

@@ -10,6 +10,7 @@ import { createApplicationRoutes } from "./src/applications/application-routes.t
 import { createPublicCompanyRoutes } from "./src/companies/public-companies.ts";
 import { createCompanyLogoRoutes } from "./src/companies/company-logos.ts";
 import { createAdminRoutes } from "./src/admin/admin-routes.ts";
+import { createSeekerProfileRoutes } from "./src/auth/seeker-profile-routes.ts";
 
 config({ quiet: true });
 
@@ -23,7 +24,8 @@ const parseJson = express.json();
 app.use((request, response, next) => {
   // CV requests are parsed after their session and origin have been checked.
   if ((request.method === "POST" && /^\/api\/job-applications\/?$/i.test(request.path))
-    || (request.method === "PUT" && /^\/api\/company-logo\/?$/i.test(request.path))) {
+    || (request.method === "PUT" && /^\/api\/(?:company-logo|seeker\/cv)\/?$/i.test(request.path))
+    || (request.method === "PATCH" && /^\/api\/seeker\/profile\/?$/i.test(request.path))) {
     next();
     return;
   }
@@ -75,9 +77,13 @@ async function startServer() {
   app.use("/api", createPublicCompanyRoutes(db, todayInTheUK));
   app.use("/api", createCompanyLogoRoutes(db, frontendOrigin));
   app.use("/api", createAdminRoutes(db, frontendOrigin));
+  app.use("/api", createSeekerProfileRoutes(db, frontendOrigin));
   app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof Error && "status" in error && error.status === 413) {
-      response.status(413).json({ message: request.path === "/api/company-logo" ? "Upload a logo up to 2 MB." : "Your CV is too large. Upload a file up to 5 MB." });
+      const uploadMessage = request.path === "/api/company-logo" ? "Upload a logo up to 2 MB."
+        : request.path === "/api/seeker/profile" ? "Upload a profile image up to 1 MB."
+        : "Your CV is too large. Upload a file up to 5 MB.";
+      response.status(413).json({ message: uploadMessage });
       return;
     }
     if (error instanceof SyntaxError && "status" in error && error.status === 400) {

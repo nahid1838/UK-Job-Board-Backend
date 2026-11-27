@@ -252,7 +252,7 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
     }
     const filter: Filter<Job> = {
       status: "live", closingDate: { $gte: todayInTheUK() },
-      ...(keyword && { $or: ["title", "description", "companyName"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) }),
+      ...(keyword && { $or: ["title", "description", "companyName", "location"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) }),
       ...(location && { location: { $regex: location, $options: "i" } }),
       ...(category && { $and: [categoryJobFilter(category)] }),
     };
