@@ -11,6 +11,7 @@ import { createPublicCompanyRoutes } from "./src/companies/public-companies.ts";
 import { createCompanyLogoRoutes } from "./src/companies/company-logos.ts";
 import { createAdminRoutes } from "./src/admin/admin-routes.ts";
 import { createSeekerProfileRoutes } from "./src/auth/seeker-profile-routes.ts";
+import { createEmployerDashboardRoutes } from "./src/companies/employer-dashboard-routes.ts";
 
 config({ quiet: true });
 
@@ -25,7 +26,7 @@ app.use((request, response, next) => {
   // CV requests are parsed after their session and origin have been checked.
   if ((request.method === "POST" && /^\/api\/job-applications\/?$/i.test(request.path))
     || (request.method === "PUT" && /^\/api\/(?:company-logo|seeker\/cv)\/?$/i.test(request.path))
-    || (request.method === "PATCH" && /^\/api\/seeker\/profile\/?$/i.test(request.path))) {
+    || (request.method === "PATCH" && /^\/api\/(?:seeker|employer)\/profile\/?$/i.test(request.path))) {
     next();
     return;
   }
@@ -78,10 +79,11 @@ async function startServer() {
   app.use("/api", createCompanyLogoRoutes(db, frontendOrigin));
   app.use("/api", createAdminRoutes(db, frontendOrigin));
   app.use("/api", createSeekerProfileRoutes(db, frontendOrigin));
+  app.use("/api", createEmployerDashboardRoutes(db, frontendOrigin));
   app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof Error && "status" in error && error.status === 413) {
       const uploadMessage = request.path === "/api/company-logo" ? "Upload a logo up to 2 MB."
-        : request.path === "/api/seeker/profile" ? "Upload a profile image up to 1 MB."
+        : /^\/api\/(?:seeker|employer)\/profile\/?$/i.test(request.path) ? "Upload a profile image up to 1 MB."
         : "Your CV is too large. Upload a file up to 5 MB.";
       response.status(413).json({ message: uploadMessage });
       return;

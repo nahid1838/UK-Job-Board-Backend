@@ -126,6 +126,32 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
     response.json({ applications: pending });
   });
 
+  router.patch("/company-application", requireJsonMutation, requireSession, async (request, response) => {
+    const ownerId = response.locals.currentUser.id;
+    const application = await applications.findOne({ _id: ownerId, status: "approved" });
+    if (!application) {
+      response.status(403).json({ message: "Only approved companies can edit their profile." });
+      return;
+    }
+    const editable = ["website", "description", "industry", "size", "contactName", "contactEmail", "contactPhone"] as const;
+    const changes = Object.fromEntries(editable.filter((key) => Object.hasOwn(request.body ?? {}, key)).map((key) => [key, request.body[key]]));
+    if (!Object.keys(changes).length) {
+      response.status(400).json({ message: "Provide at least one company profile change." });
+      return;
+    }
+    let details;
+    try {
+      details = validateDetails({ ...application.details, ...changes });
+    } catch (error) {
+      response.status(400).json({ message: error instanceof Error ? error.message : "Check your company details." });
+      return;
+    }
+    const updates = Object.fromEntries(editable.filter((key) => Object.hasOwn(changes, key)).map((key) => [`details.${key}`, details[key]]));
+    const updated = await applications.findOneAndUpdate({ _id: ownerId, status: "approved" }, { $set: updates }, { returnDocument: "after" });
+    if (!updated) { response.status(409).json({ message: "Company status changed. Refresh and try again." }); return; }
+    response.json({ application: updated });
+  });
+
   router.patch("/admin/company-applications/:id", requireJsonMutation, requireSession, requireAdmin, async (request, response) => {
     const { status, revision } = request.body ?? {};
     const reason = typeof request.body?.reason === "string" ? request.body.reason.trim() : "";

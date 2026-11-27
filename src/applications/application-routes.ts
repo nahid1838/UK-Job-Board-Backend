@@ -32,6 +32,7 @@ type Application = {
   reviewedBy?: string;
   forwardedAt?: Date;
   forwardedBy?: string;
+  employerStatus?: "reviewed" | "shortlisted" | "not-suitable";
 };
 
 const privateFields = { cv: 0, seekerId: 0, companyOwnerId: 0, reviewedBy: 0, forwardedBy: 0 } as const;
@@ -186,6 +187,30 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
     }
     const results = await applications.find({ companyOwnerId: ownerId, status: "forwarded" }).project(privateFields).sort({ forwardedAt: -1 }).toArray();
     response.json({ applications: results });
+  });
+
+  router.patch("/employer/job-applications/:id", requireMutation, requireSession, async (request, response) => {
+    const { id } = request.params;
+    const { status } = request.body ?? {};
+    if (typeof id !== "string" || (status !== "reviewed" && status !== "shortlisted" && status !== "not-suitable")) {
+      response.status(400).json({ message: "Choose a valid employer review status." });
+      return;
+    }
+    const ownerId = response.locals.currentUser.id;
+    const company = await companies.findOne({ _id: ownerId, status: "approved" }, { projection: { _id: 1 } });
+    if (!company) {
+      response.status(403).json({ message: "Your company must be approved to review applications." });
+      return;
+    }
+    const result = await applications.updateOne(
+      { _id: id, companyOwnerId: ownerId, status: "forwarded" },
+      { $set: { employerStatus: status } },
+    );
+    if (!result.matchedCount) {
+      response.status(404).json({ message: "Forwarded application not found." });
+      return;
+    }
+    response.json({ employerStatus: status });
   });
 
   router.get("/job-applications/:id/cv", requireSession, async (request, response) => {
