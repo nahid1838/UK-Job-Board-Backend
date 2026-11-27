@@ -7,11 +7,14 @@ import { createCompanyRoutes } from "./src/companies/company-routes.ts";
 import { createJobRoutes, todayInTheUK } from "./src/jobs/job-routes.ts";
 import { createCategoryRoutes, getCategoryCollection } from "./src/categories/category-routes.ts";
 import { createApplicationRoutes } from "./src/applications/application-routes.ts";
+import { createPublicCompanyRoutes } from "./src/companies/public-companies.ts";
+import { createCompanyLogoRoutes } from "./src/companies/company-logos.ts";
+import { createAdminRoutes } from "./src/admin/admin-routes.ts";
 
 config({ quiet: true });
 
 const app = express();
-const host = "localhost";
+const host = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0.0" : "localhost");
 const port = Number(process.env.PORT ?? 5000);
 const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
@@ -19,7 +22,8 @@ app.use(cors({ origin: frontendOrigin, credentials: true }));
 const parseJson = express.json();
 app.use((request, response, next) => {
   // CV requests are parsed after their session and origin have been checked.
-  if (request.method === "POST" && /^\/api\/job-applications\/?$/i.test(request.path)) {
+  if ((request.method === "POST" && /^\/api\/job-applications\/?$/i.test(request.path))
+    || (request.method === "PUT" && /^\/api\/company-logo\/?$/i.test(request.path))) {
     next();
     return;
   }
@@ -68,9 +72,12 @@ async function startServer() {
     throw new Error("Could not prepare the MongoDB categories collection.");
   }
   app.use("/api", createCompanyRoutes(db, frontendOrigin), createJobRoutes(db, frontendOrigin), createApplicationRoutes(db, frontendOrigin), createCategoryRoutes(db, frontendOrigin, todayInTheUK));
-  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  app.use("/api", createPublicCompanyRoutes(db, todayInTheUK));
+  app.use("/api", createCompanyLogoRoutes(db, frontendOrigin));
+  app.use("/api", createAdminRoutes(db, frontendOrigin));
+  app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof Error && "status" in error && error.status === 413) {
-      response.status(413).json({ message: "Your CV is too large. Upload a file up to 5 MB." });
+      response.status(413).json({ message: request.path === "/api/company-logo" ? "Upload a logo up to 2 MB." : "Your CV is too large. Upload a file up to 5 MB." });
       return;
     }
     if (error instanceof SyntaxError && "status" in error && error.status === 400) {

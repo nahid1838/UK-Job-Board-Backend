@@ -1,6 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { MongoServerError, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
+import { publicCompanyId } from "./public-companies.ts";
+import { companyLogoIds } from "./company-logos.ts";
 
 const fieldLimits = {
   name: 120, registrationNumber: 8, address: 180, town: 100, postcode: 10,
@@ -77,7 +79,13 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
 
   router.get("/company-application", requireSession, async (_request, response) => {
     const application = await applications.findOne({ _id: response.locals.currentUser.id });
-    response.json({ application });
+    if (application?.status !== "approved") {
+      response.json({ application });
+      return;
+    }
+    const id = publicCompanyId(application._id);
+    const logos = await companyLogoIds(db, [id]);
+    response.json({ application: { ...application, logoUrl: logos.has(id) ? `/company-logo/${id}` : undefined } });
   });
 
   router.post("/company-application", requireJsonMutation, requireSession, async (request, response) => {

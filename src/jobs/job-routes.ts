@@ -1,5 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { ObjectId, type Db } from "mongodb";
+import { ObjectId, type Db, type Filter, type Sort } from "mongodb";
+import { publicCompanyId } from "../companies/public-companies.ts";
+import { companyLogoIds } from "../companies/company-logos.ts";
 import { createRequireSession } from "../auth/session-routes.ts";
 import type { CompanyApplication } from "../companies/company-routes.ts";
 import { categoryJobFilter, escapeSearch, findActiveCategory } from "../categories/category-routes.ts";
@@ -20,9 +22,10 @@ export type Job = JobDetails & {
   categoryId?: string;
   ownerId: string;
   companyName: string;
-  status: "draft" | "live";
+  status: "draft" | "live" | "closed";
   createdAt: Date;
   publishedAt?: Date;
+  featuredUntil?: Date;
 };
 
 export function todayInTheUK() {
@@ -99,6 +102,14 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
     next();
   }
 
+  function requireAdmin(_request: Request, response: Response, next: NextFunction) {
+    if (response.locals.currentUser.role !== "admin") {
+      response.status(403).json({ message: "Only admins can moderate jobs." });
+      return;
+    }
+    next();
+  }
+
   router.get("/employer/jobs", requireSession, requireApprovedCompany, async (_request, response) => {
     const ownedJobs = await jobs.find({ ownerId: response.locals.currentUser.id }).sort({ createdAt: -1 }).toArray();
     response.json({ jobs: ownedJobs });
@@ -149,6 +160,84 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
     response.json({ job });
   });
 
+  async function manageJob(request: Request, response: Response) {
+    const { id } = request.params;
+    const action = request.body?.action;
+    const user = response.locals.currentUser;
+    const isAdmin = user.role === "admin";
+    if (typeof id !== "string" || !/^[a-f0-9]{24}$/i.test(id)) {
+      response.status(404).json({ message: "Job not found." });
+      return;
+    }
+    const filter = { _id: new ObjectId(id), ...(!isAdmin && { ownerId: user.id }) };
+    const current = await jobs.findOne(filter);
+    if (!current) {
+      response.status(404).json({ message: "Job not found." });
+      return;
+    }
+    if (action === "duplicate" && !isAdmin) {
+      const { _id, featuredUntil, publishedAt, ...details } = current;
+      const job: Job = { ...details, status: "draft", createdAt: new Date() };
+      const result = await jobs.insertOne(job);
+      response.status(201).json({ job: { ...job, _id: result.insertedId } });
+      return;
+    }
+    let update: Partial<Job>;
+    if (action === "edit") {
+      const category = await findActiveCategory(db, request.body.categoryId);
+      if (!category) {
+        response.status(400).json({ message: "Choose an active category." });
+        return;
+      }
+      try {
+        update = { ...readJobDetails({ ...request.body, category: category.name }), categoryId: category._id.toHexString() };
+      } catch (error) {
+        response.status(400).json({ message: error instanceof Error ? error.message : "Check the job details." });
+        return;
+      }
+    } else if (action === "close" && current.status === "live") {
+      update = { status: "closed", featuredUntil: new Date(0) };
+    } else if (action === "reopen" && !isAdmin && current.status === "closed" && current.closingDate >= todayInTheUK()) {
+      update = { status: "live", publishedAt: new Date() };
+    } else if (action === "feature" && current.status === "live" && current.closingDate >= todayInTheUK()) {
+      if (typeof request.body.featured !== "boolean") {
+        response.status(400).json({ message: "Choose whether to feature this job." });
+        return;
+      }
+      update = { featuredUntil: request.body.featured ? new Date(Date.now() + 7 * 86_400_000) : new Date(0) };
+    } else {
+      response.status(409).json({ message: "This action is unavailable for the current job status." });
+      return;
+    }
+    const job = await jobs.findOneAndUpdate({ ...filter, status: current.status }, { $set: update }, { returnDocument: "after" });
+    if (!job) {
+      response.status(409).json({ message: "This job changed. Refresh and try again." });
+      return;
+    }
+    response.json({ job });
+  }
+
+  async function deleteJob(request: Request, response: Response) {
+    const { id } = request.params;
+    const user = response.locals.currentUser;
+    const result = typeof id === "string" && /^[a-f0-9]{24}$/i.test(id)
+      ? await jobs.deleteOne({ _id: new ObjectId(id), ...(user.role !== "admin" && { ownerId: user.id }) })
+      : { deletedCount: 0 };
+    if (!result.deletedCount) {
+      response.status(404).json({ message: "Job not found." });
+      return;
+    }
+    response.json({ message: "Job deleted." });
+  }
+
+  router.patch("/employer/jobs/:id", requireJsonMutation, requireSession, requireApprovedCompany, manageJob);
+  router.delete("/employer/jobs/:id", requireJsonMutation, requireSession, requireApprovedCompany, deleteJob);
+  router.get("/admin/jobs", requireSession, requireAdmin, async (_request, response) => {
+    response.json({ jobs: await jobs.find().sort({ createdAt: -1 }).toArray() });
+  });
+  router.patch("/admin/jobs/:id", requireJsonMutation, requireSession, requireAdmin, manageJob);
+  router.delete("/admin/jobs/:id", requireJsonMutation, requireSession, requireAdmin, deleteJob);
+
   router.get("/jobs", async (request, response) => {
     const search = (value: unknown) => typeof value === "string"
       ? escapeSearch(value.trim().slice(0, 120))
@@ -161,25 +250,66 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       response.json({ jobs: [] });
       return;
     }
-    const results = await jobs.find({
+    const filter: Filter<Job> = {
       status: "live", closingDate: { $gte: todayInTheUK() },
       ...(keyword && { $or: ["title", "description", "companyName"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) }),
       ...(location && { location: { $regex: location, $options: "i" } }),
       ...(category && { $and: [categoryJobFilter(category)] }),
-    }).project({ ownerId: 0 }).sort({ publishedAt: -1 }).limit(100).toArray();
-    response.json({ jobs: results });
+    };
+    const { jobType, workMode, company, posted, sort, salaryPeriod } = request.query;
+    if (typeof jobType === "string" && jobType) filter.jobType = jobType.slice(0, 30);
+    if (typeof workMode === "string" && workMode) filter.workMode = workMode.slice(0, 20);
+    if (typeof company === "string" && company) filter.companyName = company.slice(0, 120);
+    if (typeof posted === "string" && ["1", "7", "30"].includes(posted)) {
+      filter.publishedAt = { $gte: new Date(Date.now() - Number(posted) * 86_400_000) };
+    }
+    const minSalary = typeof request.query.minSalary === "string" && /^\d{1,9}(\.\d{1,2})?$/.test(request.query.minSalary) ? Number(request.query.minSalary) : null;
+    const maxSalary = typeof request.query.maxSalary === "string" && /^\d{1,9}(\.\d{1,2})?$/.test(request.query.maxSalary) ? Number(request.query.maxSalary) : null;
+    const salaryFilters: Filter<Job>[] = [];
+    if (minSalary !== null) salaryFilters.push({ $or: [{ salaryMax: { $gte: minSalary } }, { salaryMax: null, salaryMin: { $gte: minSalary } }] });
+    if (maxSalary !== null) salaryFilters.push({ $or: [{ salaryMin: { $lte: maxSalary } }, { salaryMin: null, salaryMax: { $lte: maxSalary } }] });
+    if (salaryFilters.length) filter.$and = [...(filter.$and ?? []), ...salaryFilters];
+    if (salaryFilters.length || sort === "salary" || (typeof salaryPeriod === "string" && ["year", "month", "day", "hour"].includes(salaryPeriod))) {
+      filter.salaryPeriod = typeof salaryPeriod === "string" && ["year", "month", "day", "hour"].includes(salaryPeriod) ? salaryPeriod : "year";
+    }
+    if (request.query.featured === "true") filter.featuredUntil = { $gt: new Date() };
+    const limit = Math.min(100, Math.max(1, Number.parseInt(String(request.query.limit), 10) || 100));
+    const total = await jobs.countDocuments(filter);
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const page = Math.min(pages, Math.max(1, Number.parseInt(String(request.query.page), 10) || 1));
+    const order: Sort = sort === "closing" ? { closingDate: 1, publishedAt: -1, _id: -1 }
+      : sort === "salary" ? { salaryMax: -1, salaryMin: -1, _id: -1 }
+      : { publishedAt: -1, _id: -1 };
+    const now = new Date();
+    const results = (await jobs.aggregate<Job & { isFeatured: boolean }>([
+      { $match: filter },
+      { $set: { isFeatured: { $gt: [{ $ifNull: ["$featuredUntil", new Date(0)] }, now] } } },
+      { $sort: request.query.prioritiseFeatured === "true" ? { isFeatured: -1, ...order } : order },
+      { $skip: (page - 1) * limit },
+      { $limit: limit },
+    ]).toArray()).map(({ ownerId, ...job }) => ({ ...job, companyId: publicCompanyId(ownerId) }));
+    const logoIds = await companyLogoIds(db, [...new Set(results.map(({ companyId }) => companyId))]);
+    response.json({ jobs: results.map((job) => ({
+      ...job, companyLogo: logoIds.has(job.companyId) ? `/company-logo/${job.companyId}` : undefined,
+    })), total, pages, page });
   });
 
   router.get("/jobs/:id", async (request, response) => {
     const { id } = request.params;
     const job = typeof id === "string" && /^[a-f0-9]{24}$/i.test(id)
-      ? await jobs.findOne({ _id: new ObjectId(id), status: "live", closingDate: { $gte: todayInTheUK() } }, { projection: { ownerId: 0 } })
+      ? await jobs.findOne({ _id: new ObjectId(id), status: "live", closingDate: { $gte: todayInTheUK() } })
       : null;
     if (!job) {
       response.status(404).json({ message: "This job is no longer accepting applications." });
       return;
     }
-    response.json({ job });
+    const { ownerId, ...publicJob } = job;
+    const companyId = publicCompanyId(ownerId);
+    const logoIds = await companyLogoIds(db, [companyId]);
+    response.json({ job: { ...publicJob, companyId,
+      companyLogo: logoIds.has(companyId) ? `/company-logo/${companyId}` : undefined,
+      isFeatured: Boolean(job.featuredUntil && job.featuredUntil > new Date()),
+    } });
   });
 
   return router;

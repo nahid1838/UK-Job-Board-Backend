@@ -25,7 +25,7 @@ export function createRequireSession(frontendOrigin: string) {
       if (!result.ok) throw new Error("Better Auth returned an error.");
 
       const session = await result.json() as {
-        user: { id: string; role?: string; accountType?: string };
+        user: { id: string; role?: string; accountType?: string; active?: boolean };
       } | null;
 
       if (session === null) {
@@ -36,6 +36,10 @@ export function createRequireSession(frontendOrigin: string) {
       const { user } = session;
       if (typeof user?.id !== "string" || !user.id) {
         throw new Error("Better Auth returned an invalid session.");
+      }
+      if (user.active === false) {
+        response.status(403).json({ message: "This account is disabled." });
+        return;
       }
 
       // Match Next.js routing for accounts created before the role field existed.
