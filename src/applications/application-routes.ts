@@ -1,3 +1,4 @@
+import { cvUploadLimitMb } from "../cv-upload.ts";
 import { json, Router, type Request, type Response, type NextFunction } from "express";
 import { Binary, MongoServerError, ObjectId, type Db } from "mongodb";
 import { createRequireSession } from "../auth/session-routes.ts";
@@ -7,7 +8,7 @@ import { publicCompanyId } from "../companies/public-companies.ts";
 import { companyLogoIds } from "../companies/company-logos.ts";
 import { getSiteSettings, notify, recordActivity } from "../admin/site-settings.ts";
 
-const maxCvBytes = 5 * 1024 * 1024;
+const maxCvBytes = cvUploadLimitMb * 1024 * 1024;
 const cvTypes = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -58,11 +59,11 @@ function readApplication(body: Record<string, unknown>, savedCv?: { cv: Binary; 
 
   const encodedCv = body.cvBase64;
   if (typeof encodedCv !== "string" || !encodedCv || encodedCv.length > Math.ceil(maxCvBytes / 3) * 4) {
-    throw new Error("Upload a PDF or DOCX CV up to 5 MB.");
+    throw new Error(`Upload a PDF or DOCX CV up to ${cvUploadLimitMb} MB.`);
   }
   const bytes = Buffer.from(encodedCv, "base64");
   if (bytes.length > maxCvBytes || bytes.toString("base64") !== encodedCv) {
-    throw new Error("Upload a valid PDF or DOCX CV up to 5 MB.");
+    throw new Error(`Upload a valid PDF or DOCX CV up to ${cvUploadLimitMb} MB.`);
   }
   const isPdf = bytes.subarray(0, 5).toString() === "%PDF-";
   const isDocx = bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
@@ -143,12 +144,12 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       }
       throw error;
     }
-    response.status(201).json({ message: "Application submitted." });
-    void recordActivity(db, user.id, "New application submitted", job.title);
-    void notify(db, "applicationSubmitted", details.email, { job: job.title });
+    await recordActivity(db, user.id, "New application submitted", job.title);
+    await notify(db, "applicationSubmitted", details.email, { job: job.title });
     if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
-      void getSiteSettings(db).then(({ contactEmail }) => notify(db, "applicationReceived", contactEmail, { job: job.title })).catch(() => {});
+      await getSiteSettings(db).then(({ contactEmail }) => notify(db, "applicationReceived", contactEmail, { job: job.title })).catch(() => {});
     }
+    response.status(201).json({ message: "Application submitted." });
   });
 
   router.get("/job-applications/mine", requireSession, async (_request, response) => {
@@ -182,15 +183,15 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
       response.status(409).json({ message: "This application is no longer awaiting review. Refresh the inbox." });
       return;
     }
-    response.json({ status });
-    void recordActivity(db, reviewer, `Application ${status.replaceAll("-", " ")}`, id);
+    await recordActivity(db, reviewer, `Application ${status.replaceAll("-", " ")}`, id);
     if (status === "forwarded" && process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
-      void applications.findOne({ _id: id }, { projection: { companyOwnerId: 1, jobTitle: 1 } }).then(async (application) => {
+      await applications.findOne({ _id: id }, { projection: { companyOwnerId: 1, jobTitle: 1 } }).then(async (application) => {
         if (!application) return;
         const company = await companies.findOne({ _id: application.companyOwnerId, status: "approved" });
         if (company) await notify(db, "applicationForwarded", company.details.contactEmail, { job: application.jobTitle });
       }).catch(() => {});
     }
+    response.json({ status });
   });
 
   router.get("/employer/job-applications", requireSession, async (_request, response) => {
@@ -213,8 +214,8 @@ export function createApplicationRoutes(db: Db, frontendOrigin: string) {
     }
     const result = await applications.updateOne({ _id: id }, { $set: { adminNote: note } });
     if (!result.matchedCount) { response.status(404).json({ message: "Application not found." }); return; }
+    await recordActivity(db, response.locals.currentUser.id, "Application note updated", id);
     response.json({ note });
-    void recordActivity(db, response.locals.currentUser.id, "Application note updated", id);
   });
 
   router.patch("/employer/job-applications/:id", requireMutation, requireSession, async (request, response) => {

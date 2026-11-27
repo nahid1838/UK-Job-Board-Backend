@@ -158,8 +158,8 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       response.status(409).json({ message: "This draft is unavailable or its closing date has passed." });
       return;
     }
+    await recordActivity(db, ownerId, "Job published", job.title);
     response.json({ job });
-    void recordActivity(db, ownerId, "Job published", job.title);
   });
 
   async function manageJob(request: Request, response: Response) {
@@ -217,8 +217,8 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       response.status(409).json({ message: "This job changed. Refresh and try again." });
       return;
     }
+    await recordActivity(db, user.id, action === "feature" ? (request.body.featured ? "Job featured" : "Job unfeatured") : `Job ${action === "close" ? "closed" : action === "reopen" ? "reopened" : "edited"}`, job.title);
     response.json({ job });
-    void recordActivity(db, user.id, action === "feature" ? (request.body.featured ? "Job featured" : "Job unfeatured") : `Job ${action === "close" ? "closed" : action === "reopen" ? "reopened" : "edited"}`, job.title);
   }
 
   async function deleteJob(request: Request, response: Response) {
@@ -231,8 +231,8 @@ export function createJobRoutes(db: Db, frontendOrigin: string) {
       response.status(404).json({ message: "Job not found." });
       return;
     }
+    await recordActivity(db, user.id, "Job deleted", typeof id === "string" ? id : "");
     response.json({ message: "Job deleted." });
-    void recordActivity(db, user.id, "Job deleted", typeof id === "string" ? id : "");
   }
 
   router.patch("/employer/jobs/:id", requireJsonMutation, requireSession, requireApprovedCompany, manageJob);

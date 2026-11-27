@@ -112,11 +112,11 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
         { $set: submission, $inc: { revision: 1 }, $unset: { reviewedAt: "", reviewedBy: "", rejectionReason: "" } },
         { upsert: true, returnDocument: "after" },
       );
-      response.status(201).json({ application });
-      void recordActivity(db, user.id, "Company application submitted", details.name);
+      await recordActivity(db, user.id, "Company application submitted", details.name);
       if (process.env.RESEND_API_KEY && process.env.EMAIL_FROM) {
-        void getSiteSettings(db).then(({ contactEmail }) => notify(db, "companySubmitted", contactEmail, { company: details.name })).catch(() => {});
+        await getSiteSettings(db).then(({ contactEmail }) => notify(db, "companySubmitted", contactEmail, { company: details.name })).catch(() => {});
       }
+      response.status(201).json({ application });
     } catch (error) {
       if (error instanceof MongoServerError && error.code === 11000) {
         response.status(409).json({ message: "You already have a pending or approved company application. Refresh to see its current status." });
@@ -180,11 +180,11 @@ export function createCompanyRoutes(db: Db, frontendOrigin: string) {
       response.status(409).json({ message: "This application has already changed. Refresh the queue before reviewing again." });
       return;
     }
-    response.json({ application: reviewed });
-    void recordActivity(db, response.locals.currentUser.id, `Company ${status}`, reviewed.details.name);
+    await recordActivity(db, response.locals.currentUser.id, `Company ${status}`, reviewed.details.name);
     if (status === "approved" || status === "rejected") {
-      void notify(db, status === "approved" ? "companyApproved" : "companyRejected", reviewed.details.contactEmail, { company: reviewed.details.name, reason });
+      await notify(db, status === "approved" ? "companyApproved" : "companyRejected", reviewed.details.contactEmail, { company: reviewed.details.name, reason });
     }
+    response.json({ application: reviewed });
   });
 
   return router;

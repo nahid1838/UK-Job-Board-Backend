@@ -1,3 +1,4 @@
+import { cvUploadLimitMb } from "../cv-upload.ts";
 import { json, Router, type Request, type Response, type NextFunction } from "express";
 import { Binary, type Db } from "mongodb";
 import { createRequireSession } from "./session-routes.ts";
@@ -92,8 +93,8 @@ export function createSeekerProfileRoutes(db: Db, frontendOrigin: string) {
     const bytes = typeof encoded === "string" && encoded.length <= 6990508 ? Buffer.from(encoded, "base64") : null;
     const pdf = bytes?.subarray(0, 5).toString() === "%PDF-";
     const docx = bytes?.subarray(0, 4).equals(Buffer.from([80, 75, 3, 4])) && bytes.includes(Buffer.from("word/document.xml"));
-    if (!bytes || bytes.length > 5 * 1024 * 1024 || bytes.toString("base64") !== encoded || (!pdf && !docx)) {
-      response.status(400).json({ message: "Choose a PDF or DOCX file up to 5 MB." });
+    if (!bytes || bytes.length > cvUploadLimitMb * 1024 * 1024 || bytes.toString("base64") !== encoded || (!pdf && !docx)) {
+      response.status(400).json({ message: `Choose a PDF or DOCX file up to ${cvUploadLimitMb} MB.` });
       return;
     }
     await profiles.updateOne({ _id: response.locals.currentUser.id }, { $set: { cv: new Binary(bytes), cvType: pdf ? "pdf" : "docx" } }, { upsert: true });

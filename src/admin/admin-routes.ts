@@ -163,6 +163,35 @@ export function createAdminRoutes(db: Db, frontendOrigin: string) {
     response.json({ message: "Account status updated." });
   });
 
+  router.patch("/admin/users/:id/role", requireMutation, requireSession, requireAdmin, async (request, response) => {
+    const { id } = request.params;
+    if (typeof id !== "string" || !/^[a-f0-9]{24}$/i.test(id) || request.body?.role !== "admin") {
+      response.status(400).json({ message: "Choose a valid account to promote to admin." });
+      return;
+    }
+
+    const userId = new ObjectId(id);
+    const result = await users.updateOne(
+      { _id: userId, role: { $ne: "admin" }, active: { $ne: false } },
+      { $set: { role: "admin" } },
+    );
+    if (result.modifiedCount) {
+      await recordActivity(db, response.locals.currentUser.id, "Promoted user to admin", id);
+    } else {
+      const user = await users.findOne({ _id: userId });
+      if (!user) {
+        response.status(404).json({ message: "This account could not be found." });
+        return;
+      }
+      if (user.role !== "admin") {
+        response.status(409).json({ message: "Reactivate this account before granting admin access." });
+        return;
+      }
+    }
+
+    response.json({ role: "admin" });
+  });
+
   router.get("/admin/activity", requireSession, requireAdmin, async (_request, response) => {
     const activity = await db.collection("activityLog").find().sort({ createdAt: -1 }).limit(100).toArray();
     response.json({ activity });

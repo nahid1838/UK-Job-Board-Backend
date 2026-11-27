@@ -99,8 +99,8 @@ export function createCategoryRoutes(db: Db, frontendOrigin: string, todayInTheU
     try {
       const _id = new ObjectId();
       await categories.insertOne({ _id, ...details, nameKeys: [details.name.toLowerCase()] });
+      await recordActivity(db, response.locals.currentUser.id, "Category added", details.name);
       response.status(201).json({ category: { _id, ...details } });
-      void recordActivity(db, response.locals.currentUser.id, "Category added", details.name);
     } catch (error) {
       if (!(error instanceof MongoServerError) || error.code !== 11000) throw error;
       response.status(409).json({ message: "That name is already in use by a category, including past names." });
@@ -124,8 +124,8 @@ export function createCategoryRoutes(db: Db, frontendOrigin: string, todayInTheU
         response.status(404).json({ message: "Category not found." });
         return;
       }
+      await recordActivity(db, response.locals.currentUser.id, "Category updated", details.name);
       response.json({ category });
-      void recordActivity(db, response.locals.currentUser.id, "Category updated", details.name);
     } catch (error) {
       if (!(error instanceof MongoServerError) || error.code !== 11000) throw error;
       response.status(409).json({ message: "That name is already in use by a category, including past names." });
